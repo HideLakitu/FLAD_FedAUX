@@ -1,0 +1,2 @@
+2025-05-05 18:07:13 | dataset_type:DOS2019 | flows (tot,ben,ddos):(18313,1221,17092) | fragments (tot,ben,ddos):(19413,2265,17148) | options:--dataset_type DOS2019 --dataset_folder ./path_to/dataset-test2/test1/ --packets_per_flow 10 --dataset_id DOS2019 --traffic_type all --time_window 10 | process_time:246.14374017715454 |
+2025-05-05 18:08:20 | examples (tot,ben,ddos):(4530,2265,2265) | Train/Val/Test sizes: (3668,409,453) | Packets (train,val,test):(16077,1736,2052) | options:--preprocess_folder ./path_to/dataset-test2/test1/ |
