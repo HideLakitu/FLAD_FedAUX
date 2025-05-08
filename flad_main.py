@@ -31,8 +31,9 @@ def main(argv):
 
     parser.add_argument('-e', '--local_epochs', nargs='?', type=int, default=None,
                         help='Number of local epochs (default: None, which means adaptive)')
-
-    parser.add_argument('-m', '--model', type=str, default="mlp", choices=['mlp', 'cnn'],
+    
+    #  尝试修改以支持导入模型进行训练
+    parser.add_argument('-m', '--model', type=str, default="mlp",
                         help='Load model from disk (when a path is passed) or generate a new model (mlp and cnn are possible options)')
 
     parser.add_argument('-o', '--output_folder', nargs='?', type=str, default=None,
@@ -46,6 +47,10 @@ def main(argv):
     
     parser.add_argument('-S', '--rn_seed', nargs='?', type=int, default=0,
                         help='Seed value for RNGs used in FLAD')
+
+    #  Server预训练
+    parser.add_argument('--pretrain_server', type=str, default='false', choices=['true', 'false'],
+                        help='Enable server-side pretraining with pretrained model (default: false)')
 
     args = parser.parse_args()
 
@@ -103,7 +108,8 @@ def main(argv):
         # full FL training
         FederatedTrain(clients, args.model, output_folder, time_window, max_flow_len, dataset_name,
                         epochs=epochs, steps=steps, training_mode='flad', weighted=False,
-                        optimizer=args.optimizer, nr_experiments=EXPERIMENTS)
+                        optimizer=args.optimizer, nr_experiments=EXPERIMENTS, pretrain_server=(args.pretrain_server.lower() == 'true'))
+
 
 if __name__ == "__main__":
     main(sys.argv[1:])

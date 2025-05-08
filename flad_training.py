@@ -25,13 +25,26 @@ import copy
 import gc
 import shutil
 
+#  服务器预训练
+from server_initializer import init_server_with_pretraining
+
+#  统计通信量
+def calculate_model_size(model):
+    total_params = model.count_params()  # Keras模型总参数数量
+    size_bytes = total_params * 4        # 每个参数占4字节（32位浮点）
+    size_MB = size_bytes / (1024 ** 2)   # 转换为MB
+
+    return size_MB
+
 
 # General hyperparameters
 EXPERIMENTS = 10
 
 # FL hyper-parameters
 PATIENCE = 25
-CLIENT_FRACTION = 0.8  # Fraction of clients selected at each round for FedAvg-based approaches
+CLIENT_FRACTION = 1.0  # Fraction of clients selected at each round for FedAvg-based approaches
+
+MAX_ROUNDS = 1  # 手动设置总通信轮数
 
 
 def trainClientModel(model, epochs, X_train, Y_train, X_val, Y_val, steps_per_epoch=None):
@@ -52,10 +65,12 @@ def trainClientModel(model, epochs, X_train, Y_train, X_val, Y_val, steps_per_ep
 # Federated training procedure
 #  接收多个client的数据集，并使用指定的模型和optimizer进行训练
 def FederatedTrain(clients, model_type, outdir, time_window, max_flow_len, dataset_name, epochs='auto', steps='auto',
-                   training_mode='flad', weighted=False, optimizer='SGD', nr_experiments=EXPERIMENTS):
+                   training_mode='flad', weighted=False, optimizer='SGD', nr_experiments=EXPERIMENTS, pretrain_server=False):
     round_fieldnames = ['Model', 'Round', 'AvgF1']
     tuning_fieldnames = ['Model', 'Epochs', 'Steps', 'Mode', 'Weighted', 'Experiment', 'ClientsOrder', 'Round',
-                         'TotalClientRounds', 'F1', 'F1_std', 'Time(sec)']
+                         'TotalClientRounds', 'F1', 'F1_std', 'Time(sec)',
+                         'Round_Communication(MB)', 'Total_Communication(MB)']
+
     for client in clients:
         round_fieldnames.append(client['name'] + '(f1)')
         round_fieldnames.append(client['name'] + '(loss)')
@@ -70,10 +85,28 @@ def FederatedTrain(clients, model_type, outdir, time_window, max_flow_len, datas
     hyperparamters_tuning_file.flush()  # 将缓存中的内容写入磁盘
 
     # we start all the experiments with the same server, which means same initial model and random weights
-    server = init_server(model_type, dataset_name, clients[0]['input_shape'], max_flow_len)
+    # server = init_server(model_type, dataset_name, clients[0]['input_shape'], max_flow_len)
+
+    #  是否启用预训练的模型
+    if pretrain_server:
+        PRETRAINED_PATH = "./FEDAUX/pretain_server/s1-mlp.pth"
+        print(f"✅ 已启用服务器端预训练，将加载预训练模型: {PRETRAINED_PATH}")
+    else:
+        PRETRAINED_PATH = None
+        print("❌ 未启用服务器端预训练，将使用随机初始化模型权重")
+
+    server = init_server_with_pretraining(model_type, dataset_name, clients[0]['input_shape'], max_flow_len,
+                                          pretrained_path=PRETRAINED_PATH)
+    
+    #  打印外部模型的结构
+    if model_type not in ['mlp', 'cnn']:
+        server['model'].summary()                                        
+
     if server == None:
         exit(-1)
     model_name = server['model'].name
+    
+    
 
     # we keep client_indeces for compatibility with the full experiments
     client_indeces = list(range(0, len(clients)))  # 标识所有客户端。这有助于跟踪各客户端的训练情况
@@ -95,12 +128,28 @@ def FederatedTrain(clients, model_type, outdir, time_window, max_flow_len, datas
     max_f1 = 0
     stop = False
 
+    # 初始化通信量统计
+    total_communication = 0  # 累计通信量
+
     while True:  # training epochs
         total_rounds += 1
+
+        #  添加手动设置训练Round数
+        if total_rounds > MAX_ROUNDS:
+            print("\nReached maximum number of training rounds.")
+            best_model_file_name = str(time_window) + 't-' + str(max_flow_len) + 'n-' + model_name + '-global-model.h5'
+            best_model.save(outdir + '/' + best_model_file_name)
+            print(f"\n✅ 已保存最终best_model至 {outdir}/{best_model_file_name}")
+
+            break
 
         # here we set clients' epochs and steps/epoch
         update_client_training_parameters(client_subset, 'epochs', epochs, MAX_EPOCHS, MIN_EPOCHS)
         update_client_training_parameters(client_subset, 'steps_per_epoch', steps, MAX_STEPS, MIN_STEPS)
+
+        #  通信参数, 发送全局模型到客户端(download)
+        round_communication = 0  # 每轮通信量归零
+        server_model_size = calculate_model_size(server['model'])
 
         training_time = 0
         for client in client_subset:
@@ -120,9 +169,14 @@ def FederatedTrain(clients, model_type, outdir, time_window, max_flow_len, datas
                     client['validation'][0],
                     client['validation'][1],
                     steps_per_epoch=client['steps_per_epoch'])
+
                 client['rounds'] += 1
                 if client['round_time'] > training_time:
                     training_time = client['round_time']
+
+                 #  客户端向服务器发送模型的通信量统计(upload)
+                client_model_size = calculate_model_size(client['model'])
+                round_communication += client_model_size
 
         #  聚合Clients的模型
         server['model'] = aggregation_weighted_sum(server, client_subset, weighted)
@@ -137,11 +191,13 @@ def FederatedTrain(clients, model_type, outdir, time_window, max_flow_len, datas
         # 更新训练记录
         row = {'Model': model_name if f1_val < max_f1 else "*" + model_name, 'Round': int(total_rounds),
                'AvgF1': '{:06.5f}'.format(f1_val)}  # model_name前加*，以标记该轮取得了新的最高F1得分
+
         for client in client_subset:
             row[client['name'] + '(f1)'] = '{:06.5f}'.format(client['f1_val'])
             row[client['name'] + '(loss)'] = '{:06.5f}'.format(client['loss_val'])
         writer.writerow(row)
         training_file.flush()
+
 
         if f1_val > max_f1:
             max_f1 = f1_val
@@ -153,8 +209,14 @@ def FederatedTrain(clients, model_type, outdir, time_window, max_flow_len, datas
             stop_counter += 1
             print("Stop counter: " + str(stop_counter))
 
+
         print('Current Max F1 Score: ' + str(max_f1))
         print("##############################################\n")
+
+        # 在这里加入通信统计输出
+        total_communication += round_communication
+        print(f"Round {total_rounds}: Communication this round: {round_communication:.4f} MB, "
+              f"Total communication: {total_communication:.4f} MB\n")
 
         total_client_rounds = 0
         for client in clients:
@@ -166,7 +228,11 @@ def FederatedTrain(clients, model_type, outdir, time_window, max_flow_len, datas
                'Mode': training_mode, 'Weighted': weighted, 'Experiment': 0,
                'ClientsOrder': ' '.join(str(c) for c in client_indeces), 'Round': int(total_rounds),
                'TotalClientRounds': int(total_client_rounds), 'F1': '{:06.5f}'.format(f1_val),
-               'F1_std': '{:06.5f}'.format(f1_std_val), 'Time(sec)': '{:06.2f}'.format(training_time)}
+               'F1_std': '{:06.5f}'.format(f1_std_val), 'Time(sec)': '{:06.2f}'.format(training_time),
+               'Round_Communication(MB)': '{:.4f}'.format(round_communication),
+                'Total_Communication(MB)': '{:.4f}'.format(total_communication)}
+
+
         for client in clients:
             row[client['name'] + '(f1)'] = '{:06.5f}'.format(client['f1_val_best'])
             row[client['name'] + '(rounds)'] = int(client['rounds'])

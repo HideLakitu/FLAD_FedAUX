@@ -14,32 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import os
-import torch
-import numpy as np
-
-from tensorflow.keras.layers import Input, Conv2D, Activation, MaxPool2D, Flatten, Dense, Dropout
-from tensorflow.keras.models import Model
-from tensorflow.keras import backend as K
-
-
-#  设置 TensorFlow 日志的显示级别 (=2为只显示错误信息)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # set tensorflow log level
-
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' # set tensorflow log level
 from util_functions import *
 import tensorflow as tf
-#  限制 TensorFlow 运行时使用的并行线程数
 config = tf.compat.v1.ConfigProto(inter_op_parallelism_threads=1)
-
 from tensorflow.keras.optimizers import Adam,SGD
-from tensorflow.keras.layers import Input, Dense, Activation,  Flatten, Conv2D
+from tensorflow.keras.layers import Input, Conv2D, Activation, MaxPooling2D, Flatten, Dense, Dropout
 from tensorflow.keras.layers import MaxPooling2D, Dropout
 from tensorflow.keras.models import Model, Sequential, save_model, load_model, clone_model
 import tensorflow.keras.backend as K
 from tensorflow.keras.utils import plot_model, to_categorical
 from tensorflow._api.v2.math import reduce_sum, square
-
 
 K.set_image_data_format('channels_last')
 
@@ -54,20 +40,59 @@ MAX_EPOCHS = 5
 MIN_STEPS = 10
 MAX_STEPS = 1000
 
-
-def compileModel(model, optimizer_type="SGD", loss='binary_crossentropy'):
+def compileModel(model, optimizer_type="SGD",loss='binary_crossentropy'):
     if optimizer_type == "Adam":
         optimizer = Adam(learning_rate=0.01, beta_1=0.9, beta_2=0.999, epsilon=None, amsgrad=False)
     else:
         optimizer = SGD(learning_rate=0.1, momentum=0.0, nesterov=False)
 
-    model.compile(loss=loss, optimizer=optimizer, metrics=['accuracy'])
+    model.compile(loss=loss, optimizer=optimizer,metrics=['accuracy'])
+
+
+#  尝试修改CNN
+def CNNModel(model_name, input_shape, kernels=64, kernel_rows=3, kernel_col=3, pool_height='min', classes=1, dropout=None, regularization=None):
+    K.clear_session()
+    
+    # 创建输入层
+    inputs = Input(shape=input_shape)
+    
+    # 添加卷积层
+    x = Conv2D(kernels, (kernel_rows, kernel_col), strides=(1, 1), kernel_regularizer=regularization, name='conv0')(inputs)
+    if dropout is not None and isinstance(dropout, float):
+        x = Dropout(dropout)(x)
+    x = Activation('relu')(x)
+    
+    # 获取当前形状
+    current_shape = K.int_shape(x)  # 替换 model.layers[0].output_shape
+    current_rows = current_shape[1]
+    current_cols = current_shape[2]
+    current_channels = current_shape[3]
+
+    # 设置池化区域高度
+    if pool_height == 'min':
+        pool_height = 3
+    elif pool_height == 'max':
+        pool_height = current_rows
+    else:
+        pool_height = 3
+
+    # 添加池化层
+    pool_size = (min(pool_height, current_rows), min(3, current_cols))
+    x = MaxPooling2D(pool_size=pool_size, name='mp0')(x)
+    x = Flatten()(x)
+    outputs = Dense(classes, activation='sigmoid', name='fc1')(x)
+
+    # 创建模型
+    model = Model(inputs=inputs, outputs=outputs, name=model_name)
+    
+    print(model.summary())
+    return model
 
 
 # Convolutional NN
-def CNNModel(model_name, input_shape, kernels,kernel_rows, kernel_col, classes=1, pool_height='max',
-             regularization=None, dropout=None):
-    K.clear_session()  # 避免内存泄露
+"""
+def CNNModel(model_name, input_shape,kernels,kernel_rows,kernel_col,classes=1, pool_height='max',regularization=None,dropout=None):
+    K.clear_session()
 
     model = Sequential(name=model_name)
     if regularization == 'l1' or regularization == "l2":
@@ -75,16 +100,10 @@ def CNNModel(model_name, input_shape, kernels,kernel_rows, kernel_col, classes=1
     else:
         regularizer = None
 
-    model.add(Conv2D(kernels, (kernel_rows, kernel_col), strides=(1, 1), input_shape=input_shape,
-                     kernel_regularizer=regularizer, name='conv0'))
-
-    #  显式构建模型，避免 output_shape 报错
-    model.build((None,) + input_shape)
-
+    model.add(Conv2D(kernels, (kernel_rows,kernel_col), strides=(1, 1), input_shape=input_shape, kernel_regularizer=regularizer, name='conv0'))
     if dropout != None and type(dropout) == float:
         model.add(Dropout(dropout))
     model.add(Activation('relu'))
-
     current_shape = model.layers[0].output_shape
     current_rows = current_shape[1]
     current_cols = current_shape[2]
@@ -106,9 +125,10 @@ def CNNModel(model_name, input_shape, kernels,kernel_rows, kernel_col, classes=1
     print(model.summary())
     return model
 
+"""
 
 # MPL model
-def FCModel(model_name, input_shape, units, classes=1, dropout=None):
+def FCModel(model_name, input_shape, units, classes=1,dropout=None):
     K.clear_session()
 
     model = Sequential(name=model_name)
@@ -130,10 +150,9 @@ def init_server(model_type, dataset_name, input_shape, max_flow_len):
     server = {}
     server['name'] = "Server"
     features = input_shape[1]
-
+    
     if model_type == 'cnn':
-        server['model'] = CNNModel('cnn', input_shape, kernels=KERNELS,
-                                   kernel_rows=min(3, max_flow_len), kernel_col=features)
+        server['model'] = CNNModel('cnn', input_shape, kernels=KERNELS, kernel_rows=min(3,max_flow_len), kernel_col=features)
     elif model_type == 'mlp':
         server['model'] = FCModel('mlp', input_shape, units=MLP_UNITS)
     elif model_type is not None:
@@ -156,9 +175,9 @@ def init_client(subfolder, X_train, Y_train, X_val, Y_val, dataset_name, time_wi
     client['name'] = subfolder.strip('/').split('/')[-1] #name of the client based on the folder name
     client['folder'] = subfolder
     X_train_tensor = tf.convert_to_tensor(X_train, dtype=tf.float32)
-    client['training'] = (X_train_tensor, Y_train)
+    client['training'] = (X_train_tensor,Y_train)
     X_val_tensor = tf.convert_to_tensor(X_val, dtype=tf.float32)
-    client['validation'] = (X_val_tensor, Y_val)
+    client['validation'] = (X_val_tensor,Y_val)
     client['samples'] = client['training'][1].shape[0]
     client['dataset_name'] = dataset_name
     client['input_shape'] = client['training'][0].shape[1:4]
@@ -168,9 +187,8 @@ def init_client(subfolder, X_train, Y_train, X_val, Y_val, dataset_name, time_wi
     client['max_flow_len'] = max_flow_len
     client['flddos_lambda'] = 0.9 if "WebDDoS" in client['name'] or "Syn" in client['name'] else 1
     reset_client(client)
-
+    
     return client
-
 
 def reset_client(client):
     client['local_model'] = None # local model trained only with local data (FLDDoS comparison)
@@ -184,14 +202,12 @@ def reset_client(client):
     client['round_time'] = 0
     client['update'] = True
 
-
 def check_clients(clients):
     input_shape = clients[0]['input_shape']
     features = clients[0]['features']
     classes = clients[0]['classes']
     time_window = clients[0]['time_window']
     max_flow_len = clients[0]['max_flow_len']
-
     for client in clients:
         if input_shape != client['input_shape'] or \
             features != client['features'] or \
@@ -200,8 +216,5 @@ def check_clients(clients):
             max_flow_len != client['max_flow_len']:
                 print("Inconsistent clients properties!")
                 return False
-
+                
     return True
-
-
-
